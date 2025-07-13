@@ -1,6 +1,8 @@
 from datetime import datetime
 
 import pandas as pd
+from tqdm import tqdm
+from scipy import sparse
 
 # class PublicClonotypesSelectionMethod(Enum):
 from mir.common.clonotype import ClonotypeAA
@@ -32,7 +34,7 @@ class ClonotypeUsageTable:
         self.repertoire_dataset = repertoire_dataset
         self.mismatch_max = mismatch_max
         self.threads = threads
-        self.__clonotype_database_usage = None
+        self._clonotype_database_usage = None
         self.public_clonotypes = public_clonotypes
         self.clonotype_to_matrix_index = {x: i for i, x in enumerate(self.public_clonotypes)}
         self.pair_matcher = pair_matcher
@@ -44,17 +46,36 @@ class ClonotypeUsageTable:
         a property method which created the usage database
         :return: the clonotype database object
         """
-        if self.__clonotype_database_usage is None:
-            from mir.comparative.match import MultipleRepertoireDenseMatcher
-            dense_repertoire_matcher = MultipleRepertoireDenseMatcher(mismatch_max=self.mismatch_max)
-            self.__clonotype_database_usage = dense_repertoire_matcher.get_clonotype_database_usage_for_cohort(
-                self.public_clonotypes,
-                self.repertoire_dataset,
-                self.threads,
-                self.pair_matcher,
-                self.with_counts
-            )
-        return self.__clonotype_database_usage
+        if self._clonotype_database_usage is None:
+            n_reps = len(self.repertoire_dataset)
+            n_clonos = len(self.public_clonotypes)
+
+            rows: list[int] = []
+            cols: list[int] = []
+            data: list[float] = []
+
+            chunk_size = 1000
+            for i, rep in enumerate(tqdm(self.repertoire_dataset, desc="Building usage matrix", unit="rep")):
+                for start in range(0, n_clonos, chunk_size):
+                    batch = self.public_clonotypes[start:start + chunk_size]
+                    queries = [clon.cdr3aa for clon in batch]
+                    matches = rep.trie.SearchForAll(
+                        queries,
+                        self.mismatch_max,
+                        0,
+                        0
+                    )
+                    for idx_in_batch, clon in enumerate(batch):
+                        cnt = len(matches.get(clon, []))
+                        if cnt:
+                            rows.append(i)
+                            cols.append(start + idx_in_batch)
+                            data.append(cnt)
+
+            coo = sparse.coo_matrix((data, (rows, cols)), shape=(n_reps, n_clonos))
+            self._clonotype_database_usage = coo.tocsr()
+
+        return self._clonotype_database_usage
 
     @classmethod
     def load_from_repertoire_dataset(cls, repertoire_dataset,
